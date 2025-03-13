@@ -36,9 +36,6 @@ background_distance=3
 sam2_checkpoint = "checkpoints/sam2.1_hiera_tiny.pt"
 model_cfg = "configs/sam2.1/sam2.1_hiera_t.yaml"
 
-outfolder=data_logging.make_timestamped_folder("assets/VariableFrictionHingeGrasping","human_in_the_loop_pc_segmentation")
-data_logging.write_README(outfolder,__file__,seed=seed,background_distance=background_distance,sam2_checkpoint=sam2_checkpoint,model_cfg=model_cfg)
-
 sam2 = build_sam2(model_cfg, sam2_checkpoint, device=device, apply_postprocessing=False)
 predictor = SAM2ImagePredictor(sam2)
 
@@ -60,7 +57,6 @@ while not got_image:
 
 cv2.destroyAllWindows()
 image=Image.fromarray(color_array)
-image.save(os.path.join(outfolder,"color.png"))
 image = np.array(image.convert("RGB"))
 
 predictor.set_image(image)
@@ -142,20 +138,25 @@ FIELDS_XYZ = [
 ]
 
 # Convert the datatype of point cloud from Open3D to ROS PointCloud2 (XYZRGB only)
-def convertCloudFromOpen3dToRos(open3d_cloud, frame_id="odom"):
+def convertCloudFromOpen3dToRos(open3d_cloud, shift_to_origin=True,frame_id="odom"):
     # Set "header"
     header = Header()
     header.stamp = rospy.Time.now()
     header.frame_id = frame_id
 
     # Set "fields" and "cloud_data"
-    points=open3d_cloud.point.positions.numpy()
+    points=np.asanyarray(open3d_cloud.points)
+    if shift_to_origin:
+        shift=np.min(points,axis=0)
+        points-=shift
+    else:
+        shift=np.zeros(3)
     fields=FIELDS_XYZ
     cloud_data=points
     print(cloud_data)
     # create ros_cloud
-    return pc2.create_cloud(header, fields, cloud_data)
+    return pc2.create_cloud(header, fields, cloud_data),shift
 
-cloud_source_msg=convertCloudFromOpen3dToRos(segmented_pcd)
+cloud_source_msg,shift=convertCloudFromOpen3dToRos(segmented_pcd)
 cloud_pub.publish(cloud_source_msg)
 rospy.spin()
