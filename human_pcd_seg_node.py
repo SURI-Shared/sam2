@@ -15,12 +15,14 @@ import os
 from gpd_ros.msg import CloudIndexed,CloudSources
 from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2,PointField
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import TransformStamped
 import sensor_msgs.point_cloud2 as pc2
+import tf2_msgs.msg
 
 rospy.init_node("human_in_loop_segmentation")
 cloud_pub=rospy.Publisher("/cloud_stitched",PointCloud2)
-
+full_cloud_pub=rospy.Publisher("/raw_cloud",PointCloud2)
+pub_tf = rospy.Publisher("/tf", tf2_msgs.msg.TFMessage, queue_size=1)
 plt.ion()
 
 device = torch.device("cuda")
@@ -138,25 +140,44 @@ FIELDS_XYZ = [
 ]
 
 # Convert the datatype of point cloud from Open3D to ROS PointCloud2 (XYZRGB only)
-def convertCloudFromOpen3dToRos(open3d_cloud, shift_to_origin=True,frame_id="odom"):
+def convertCloudFromOpen3dToRos(open3d_cloud, should_shift=True, frame_id="object"):
     # Set "header"
     header = Header()
     header.stamp = rospy.Time.now()
     header.frame_id = frame_id
 
     # Set "fields" and "cloud_data"
-    points=np.asanyarray(open3d_cloud.points)
-    if shift_to_origin:
+    points=open3d_cloud.point.positions.numpy()
+    if should_shift:
         shift=np.min(points,axis=0)
         points-=shift
+            #create "object frame"
+        t = TransformStamped()
+        t.header.frame_id = "camera"
+        t.header.stamp = rospy.Time.now()
+        t.child_frame_id = frame_id
+        t.transform.translation.x = shift[0]
+        t.transform.translation.y = shift[1]
+        t.transform.translation.z = shift[2]
+
+        t.transform.rotation.x = 0
+        t.transform.rotation.y = 0
+        t.transform.rotation.z = 0
+        t.transform.rotation.w = 1
+
+        tfm = tf2_msgs.msg.TFMessage([t])
+        pub_tf.publish(tfm)
     else:
-        shift=np.zeros(3)
+        shift=0
+
     fields=FIELDS_XYZ
     cloud_data=points
-    print(cloud_data)
+
     # create ros_cloud
     return pc2.create_cloud(header, fields, cloud_data),shift
 
-cloud_source_msg,shift=convertCloudFromOpen3dToRos(segmented_pcd)
+cloud_source_msg,shift=convertCloudFromOpen3dToRos(segmented_pcd,should_shift=True, frame_id="debris")
 cloud_pub.publish(cloud_source_msg)
+full_cloud,_=convertCloudFromOpen3dToRos(o3dpcd,should_shift=False, frame_id="camera")
+full_cloud_pub.publish(full_cloud)
 rospy.spin()
