@@ -15,14 +15,28 @@ import os
 from gpd_ros.msg import CloudIndexed,CloudSources
 from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2,PointField
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped,Transform
 import sensor_msgs.point_cloud2 as pc2
 import tf2_msgs.msg
+import tf2_ros
+from scipy.spatial.transform import Rotation
+
+def transform_msg_to_homogeneous(msg:Transform):
+    rotation=Rotation.from_quat([msg.rotation.x,msg.rotation.y,msg.rotation.z,msg.rotation.w])
+    mat=np.zeros((4,4))
+    mat[3,3]=1
+    mat[:,:3]=np.array([msg.translation.x,msg.translation.y,msg.translation.z])
+    mat[:3,:3]=rotation.as_matrix()
+    return mat
 
 rospy.init_node("human_in_loop_segmentation")
-cloud_pub=rospy.Publisher("/cloud_stitched",PointCloud2)
-full_cloud_pub=rospy.Publisher("/raw_cloud",PointCloud2)
+cloud_pub=rospy.Publisher("/cloud_stitched",PointCloud2,latch=True)
+full_cloud_pub=rospy.Publisher("/raw_cloud",PointCloud2,latch=True)
 pub_tf = rospy.Publisher("/tf", tf2_msgs.msg.TFMessage, queue_size=1)
+tfBuffer=tf2_ros.Buffer()
+listener=tf2_ros.TransformListener(tfBuffer)
+camera_to_world=tfBuffer.lookup_transform("world","camera",rospy.Time(0),rospy.Duration(10))
+camera_to_world_R=transform_msg_to_homogeneous(camera_to_world.transform)[:3,:3]
 plt.ion()
 
 device = torch.device("cuda")
@@ -140,7 +154,7 @@ FIELDS_XYZ = [
 ]
 
 # Convert the datatype of point cloud from Open3D to ROS PointCloud2 (XYZRGB only)
-def convertCloudFromOpen3dToRos(open3d_cloud, should_shift=True, frame_id="object"):
+def convertCloudFromOpen3dToRos(open3d_cloud, should_shift=True,world_base_frame=False, frame_id="object"):
     # Set "header"
     header = Header()
     header.stamp = rospy.Time.now()
@@ -153,12 +167,21 @@ def convertCloudFromOpen3dToRos(open3d_cloud, should_shift=True, frame_id="objec
         points-=shift
             #create "object frame"
         t = TransformStamped()
-        t.header.frame_id = "camera"
+        if world_base_frame:
+            t.header.frame_id = "world"
+        else:
+            t.header.frame_id = "camera"
         t.header.stamp = rospy.Time.now()
         t.child_frame_id = frame_id
-        t.transform.translation.x = shift[0]
-        t.transform.translation.y = shift[1]
-        t.transform.translation.z = shift[2]
+        if world_base_frame:
+            shift_in_world=camera_to_world_R@shift
+            t.transform.translation.x = shift_in_world[0]+camera_to_world.transform.translation.x
+            t.transform.translation.y = shift_in_world[1]+camera_to_world.transform.translation.y
+            t.transform.translation.z = shift_in_world[2]+camera_to_world.transform.translation.z
+        else:
+            t.transform.translation.x = shift[0]
+            t.transform.translation.y = shift[1]
+            t.transform.translation.z = shift[2]
 
         t.transform.rotation.x = 0
         t.transform.rotation.y = 0
