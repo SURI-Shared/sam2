@@ -21,6 +21,9 @@ import tf2_msgs.msg
 import tf2_ros
 from scipy.spatial.transform import Rotation
 
+camera_frame="camera_link"
+fixed_frame="world"
+
 def transform_msg_to_homogeneous(msg:Transform):
     rotation=Rotation.from_quat([msg.rotation.x,msg.rotation.y,msg.rotation.z,msg.rotation.w])
     mat=np.zeros((4,4))
@@ -35,8 +38,9 @@ full_cloud_pub=rospy.Publisher("/raw_cloud",PointCloud2,latch=True)
 pub_tf = rospy.Publisher("/tf", tf2_msgs.msg.TFMessage, queue_size=1)
 tfBuffer=tf2_ros.Buffer()
 listener=tf2_ros.TransformListener(tfBuffer)
-camera_to_world=tfBuffer.lookup_transform("world","camera",rospy.Time(0),rospy.Duration(10))
-camera_to_world_R=transform_msg_to_homogeneous(camera_to_world.transform)[:3,:3]
+camera_to_world=tfBuffer.lookup_transform(camera_frame,fixed_frame,rospy.Time(0),rospy.Duration(10))
+camera_to_world_g=transform_msg_to_homogeneous(camera_to_world.transform)
+camera_to_world_R=camera_to_world_g[:3,:3]
 plt.ion()
 
 device = torch.device("cuda")
@@ -144,7 +148,8 @@ masked_depth=raw_depth.copy()
 bool_mask=masks[0].astype(np.bool)
 masked_depth[np.logical_not(bool_mask)]=2*background_distance
 segmented_pcd=camera.o3dpcd_from_color_and_depth_arrays(masked_image,masked_depth,False)
-
+all_points_in_camera=o3dpcd.point.positions.numpy()
+segmented_points_in_camera=segmented_pcd.point.positions.numpy()
 
 # The data structure of each point in ros PointCloud2: 16 bits = x + y + z + rgb
 FIELDS_XYZ = [
@@ -153,32 +158,39 @@ FIELDS_XYZ = [
     PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
 ]
 
+def represent_pointcloud_in_frame(points,g_current2desired):
+    R=g_current2desired[:3,:3]
+    t=g_current2desired[:3,3]
+    return points@R.T+t
+
 # Convert the datatype of point cloud from Open3D to ROS PointCloud2 (XYZRGB only)
-def convertCloudFromOpen3dToRos(open3d_cloud, should_shift=True,world_base_frame=False, frame_id="object"):
+def convertCloudFromOpen3dToRos(points_in_camera, should_shift=True,world_base_frame=False, frame_id="object"):
     # Set "header"
     header = Header()
     header.stamp = rospy.Time.now()
     header.frame_id = frame_id
 
     # Set "fields" and "cloud_data"
-    points=open3d_cloud.point.positions.numpy()
     if should_shift:
-        shift=np.min(points,axis=0)
-        points-=shift
-            #create "object frame"
+        #create "object frame"
         t = TransformStamped()
         if world_base_frame:
-            t.header.frame_id = "world"
+            t.header.frame_id = fixed_frame
         else:
-            t.header.frame_id = "camera"
+            t.header.frame_id = camera_frame
         t.header.stamp = rospy.Time.now()
         t.child_frame_id = frame_id
         if world_base_frame:
-            shift_in_world=camera_to_world_R@shift
-            t.transform.translation.x = shift_in_world[0]+camera_to_world.transform.translation.x
-            t.transform.translation.y = shift_in_world[1]+camera_to_world.transform.translation.y
-            t.transform.translation.z = shift_in_world[2]+camera_to_world.transform.translation.z
+            points_in_world=represent_pointcloud_in_frame(points_in_camera,camera_to_world_g)
+            shift=np.min(points_in_world,axis=0)
+            points=points_in_world-shift
+            t.transform.translation.x = shift[0]
+            t.transform.translation.y = shift[1]
+            t.transform.translation.z = shift[2]
         else:
+            shift=np.min(points_in_camera,axis=0)
+            points=points_in_camera-shift
+
             t.transform.translation.x = shift[0]
             t.transform.translation.y = shift[1]
             t.transform.translation.z = shift[2]
@@ -192,6 +204,7 @@ def convertCloudFromOpen3dToRos(open3d_cloud, should_shift=True,world_base_frame
         pub_tf.publish(tfm)
     else:
         shift=0
+        points=points_in_camera
 
     fields=FIELDS_XYZ
     cloud_data=points
@@ -199,8 +212,37 @@ def convertCloudFromOpen3dToRos(open3d_cloud, should_shift=True,world_base_frame
     # create ros_cloud
     return pc2.create_cloud(header, fields, cloud_data),shift
 
-cloud_source_msg,shift=convertCloudFromOpen3dToRos(segmented_pcd,should_shift=True, frame_id="debris")
+cloud_source_msg,shift=convertCloudFromOpen3dToRos(segmented_points_in_camera,should_shift=True, frame_id="debris")
 cloud_pub.publish(cloud_source_msg)
-full_cloud,_=convertCloudFromOpen3dToRos(o3dpcd,should_shift=False, frame_id="camera")
+full_cloud,_=convertCloudFromOpen3dToRos(all_points_in_camera,should_shift=False, frame_id=camera_frame)
 full_cloud_pub.publish(full_cloud)
+
+segmented_pcd_centroid_in_camera=np.mean(segmented_points_in_camera,axis=0)
+t_in_camera= TransformStamped()
+t_in_camera.header.frame_id=camera_frame
+t_in_camera.header.stamp=rospy.Time.now()
+t_in_camera.child_frame_id="segmented_pcd_centroid_in_camera"
+t_in_camera.transform.translation.x=segmented_pcd_centroid_in_camera[0]
+t_in_camera.transform.translation.y=segmented_pcd_centroid_in_camera[1]
+t_in_camera.transform.translation.z=segmented_pcd_centroid_in_camera[2]
+t_in_camera.transform.rotation.x = 0
+t_in_camera.transform.rotation.y = 0
+t_in_camera.transform.rotation.z = 0
+t_in_camera.transform.rotation.w = 1
+
+# segmented_pcd_centroid_in_world=camera_to_world_R@segmented_pcd_centroid_in_camera+camera_to_world_g[:3,3]
+# t_in_world= TransformStamped()
+# t_in_world.header.frame_id=fixed_frame
+# t_in_world.header.stamp=rospy.Time.now()
+# t_in_world.child_frame_id="segmented_pcd_centroid_in_world"
+# t_in_world.transform.translation.x=segmented_pcd_centroid_in_world[0]
+# t_in_world.transform.translation.y=segmented_pcd_centroid_in_world[1]
+# t_in_world.transform.translation.z=segmented_pcd_centroid_in_world[2]
+# t_in_world.transform.rotation.x = 0
+# t_in_world.transform.rotation.y = 0
+# t_in_world.transform.rotation.z = 0
+# t_in_world.transform.rotation.w = 1
+
+tfm = tf2_msgs.msg.TFMessage([t_in_camera])
+pub_tf.publish(tfm)
 rospy.spin()
