@@ -21,7 +21,7 @@ import tf2_msgs.msg
 import tf2_ros
 from scipy.spatial.transform import Rotation
 
-camera_frame="camera_link"
+camera_frame="camera_depth_optical_frame"
 fixed_frame="world"
 
 def transform_msg_to_homogeneous(msg:Transform):
