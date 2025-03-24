@@ -24,7 +24,7 @@ from scipy.spatial.transform import Rotation
 from threading import Lock
 from cv_bridge import CvBridge
 
-camera_frame="camera_depth_optical_frame"
+camera_frame="camera_color_optical_frame"
 fixed_frame="world"
 depth_scale=1e-3#hardcoded value of mm per https://github.com/IntelRealSense/realsense-ros/issues/277#issuecomment-525676873
 bridge=CvBridge()
