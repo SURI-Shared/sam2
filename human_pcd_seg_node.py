@@ -11,6 +11,7 @@ import cv2
 import open3d
 from tools import data_logging
 import os
+from geometry_msgs.msg import Pose, PoseStamped
 
 from gpd_ros.msg import CloudIndexed,CloudSources
 from std_msgs.msg import Header
@@ -23,7 +24,8 @@ import tf2_ros
 from scipy.spatial.transform import Rotation
 from threading import Lock
 from cv_bridge import CvBridge
-
+import inspect
+import copy
 camera_frame="camera_color_optical_frame"
 fixed_frame="world"
 depth_scale=1e-3#hardcoded value of mm per https://github.com/IntelRealSense/realsense-ros/issues/277#issuecomment-525676873
@@ -67,13 +69,16 @@ def record_color_info(msg:CameraInfo):
         color_info_msg=msg
 
 depth_sub=rospy.Subscriber("/camera/aligned_depth_to_color/image_raw",ImageMsg,record_depth_image)
+# color_sub=rospy.Subscriber("/camera/depth/image_rect_raw",ImageMsg,record_color_image)
 color_sub=rospy.Subscriber("/camera/color/image_raw",ImageMsg,record_color_image)
 depth_info_sub=rospy.Subscriber("/camera/aligned_depth_to_color/camera_info",CameraInfo,record_depth_info)
 depth_info_sub=rospy.Subscriber("/camera/color/camera_info",CameraInfo,record_color_info)
 
-cloud_pub=rospy.Publisher("/cloud_stitched",PointCloud2,latch=True)
-full_cloud_pub=rospy.Publisher("/raw_cloud",PointCloud2,latch=True)
+cloud_pub = rospy.Publisher("/cloud_stitched", PointCloud2, queue_size=1, latch=True)
+full_cloud_pub=rospy.Publisher("/raw_cloud",PointCloud2,queue_size=1,latch=True)
 pub_tf = rospy.Publisher("/tf", tf2_msgs.msg.TFMessage, queue_size=1)
+pub_debre_grab = rospy.Publisher("/debre_grab", PoseStamped, queue_size=1)
+pub_debre_center = rospy.Publisher("/debre_center", PoseStamped, queue_size=1)
 tfBuffer=tf2_ros.Buffer()
 listener=tf2_ros.TransformListener(tfBuffer)
 camera_to_world=tfBuffer.lookup_transform(camera_frame,fixed_frame,rospy.Time(0),rospy.Duration(10))
@@ -231,6 +236,8 @@ def convertCloudFromOpen3dToRos(points_in_camera, should_shift=True,world_base_f
             t.transform.translation.z = shift[2]
         else:
             shift=np.min(points_in_camera,axis=0)
+            distances = np.linalg.norm(points_in_camera, axis=1)
+            shift2 = points_in_camera[np.argmin(distances)]
             points=points_in_camera-shift
 
             t.transform.translation.x = shift[0]
@@ -241,9 +248,27 @@ def convertCloudFromOpen3dToRos(points_in_camera, should_shift=True,world_base_f
         t.transform.rotation.y = 0
         t.transform.rotation.z = 0
         t.transform.rotation.w = 1
+        min_debre=PoseStamped()
+        min_debre.header.frame_id=camera_frame
+        min_debre.header.stamp=rospy.Time.now()
+        min_debre.pose.position.x=shift[0]*0.9
+        min_debre.pose.position.y=shift[1]*0.9
+        min_debre.pose.position.z=shift[2]*0.9
+        min_debre.pose.orientation.x=0
+        min_debre.pose.orientation.y=0
+        min_debre.pose.orientation.z=0
+        min_debre.pose.orientation.w=1
+        # t2=copy.copy(t)
+        # t2.child_frame_id="shifted_cscframe"
+        # t2.transform.translation.x = shift2[0]*0.9
+        # t2.transform.translation.y = shift2[1]*0.9
+        # t2.transform.translation.z = shift2[2]*0.9
 
+        pub_debre_grab.publish(min_debre)
         tfm = tf2_msgs.msg.TFMessage([t])
+        # t2m = tf2_msgs.msg.TFMessage([t2])
         pub_tf.publish(tfm)
+        # pub_tf.publish(t2m)
     else:
         shift=0
         points=points_in_camera
@@ -271,7 +296,17 @@ t_in_camera.transform.rotation.x = 0
 t_in_camera.transform.rotation.y = 0
 t_in_camera.transform.rotation.z = 0
 t_in_camera.transform.rotation.w = 1
-
+center_debre=PoseStamped()
+center_debre.header.frame_id=camera_frame
+center_debre.header.stamp=rospy.Time.now()
+center_debre.pose.position.x=segmented_pcd_centroid_in_camera[0]
+center_debre.pose.position.y=segmented_pcd_centroid_in_camera[1]
+center_debre.pose.position.z=segmented_pcd_centroid_in_camera[2]
+center_debre.pose.orientation.x=0
+center_debre.pose.orientation.y=0
+center_debre.pose.orientation.z=0
+center_debre.pose.orientation.w=1
+pub_debre_center.publish(center_debre)
 # segmented_pcd_centroid_in_world=camera_to_world_R@segmented_pcd_centroid_in_camera+camera_to_world_g[:3,3]
 # t_in_world= TransformStamped()
 # t_in_world.header.frame_id=fixed_frame
